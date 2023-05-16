@@ -1,0 +1,226 @@
+image: docker:latest
+
+stages:
+  - build
+  - test
+  - push
+  - deploy
+
+variables:
+  MS: orders
+  NGINX_CONTAINER_NAME: nginx
+  PHP_CONTAINER_NAME: php-fpm
+
+.stage_variables: &stage_variables
+  variables:
+    DOMAIN: $MS.your-domain.run
+    KUBERNETES_MASTER: your-domain-test
+    KUBERNETES_DEPLOYMENT_NAME: $MS
+    COMMON_FILENAME: env/services/.env.stage
+    ENV_FILENAME: env/$MS/.env.stage
+    NGINX_REGISTRY: registry.gitlab.com/your-domain/$MS/stage-nginx
+    PHP_REGISTRY: registry.gitlab.com/your-domain/$MS/stage-php
+    PHP_CONTAINER_PORT: 9000
+    FUNCTIONAL_SUITE_DIST_YML: functional.suite.test.yml
+    HELM_VALUES: ./helm/values-stage.yaml
+
+.prod_variables: &prod_variables
+  variables:
+    DOMAIN: $MS.your-domain.com
+    KUBERNETES_MASTER: your-domain-production
+    KUBERNETES_DEPLOYMENT_NAME: $MS
+    COMMON_FILENAME: env/services/.env.prod
+    ENV_FILENAME: env/$MS/.env.prod
+    NGINX_REGISTRY: registry.gitlab.com/your-domain/$MS/prod-nginx
+    PHP_REGISTRY: registry.gitlab.com/your-domain/$MS/prod-php
+    PHP_CONTAINER_PORT: 9000
+    FUNCTIONAL_SUITE_DIST_YML: functional.suite.prod.yml
+    HELM_VALUES: ./helm/values-prod.yaml
+
+.build: &build
+  stage: build
+  script:
+    - docker build -f ./devops/docker/nginx.dockerfile --build-arg BACKEND_ARRD_PORT=127.0.0.1:$PHP_CONTAINER_PORT --build-arg DOMAIN=$DOMAIN --no-cache -t $NGINX_REGISTRY .
+    - docker build -f ./devops/docker/php.dockerfile --build-arg ENV_COMMON_FILE_NAME=$COMMON_FILENAME  --build-arg ENV_SERVICE_FILE_NAME=$ENV_FILENAME --no-cache -t $PHP_REGISTRY .
+    - echo "BACKEND_ARRD_PORT=$PHP_CONTAINER_NAME:$PHP_CONTAINER_PORT"
+  tags:
+    - gitlab-image-builder
+  before_script:
+    - rm -f ~/.docker/config.json
+    - rsync -av /var/lib/gitlab-runner/your-domain/env/ env/ >/dev/null
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY    
+
+.test: &test
+  stage: test
+  script:
+    - helm --kubeconfig /home/gitlab-runner/$KUBERNETES_MASTER upgrade $MS --install --debug --dry-run -f ./helm/CronJob-Values.yaml -f ./helm/Deployments-Values.yaml -f $HELM_VALUES ./helm
+    - docker network create -d bridge $DOMAIN-network
+    - docker run -d --rm --network=$DOMAIN-network --name $DOMAIN-mongodb -e MONGO_INITDB_DATABASE=orders_test registry.gitlab.com/your-domain/orders/mongo:4.0.9-xenial
+    - docker run -d --rm --network=$DOMAIN-network --name $DOMAIN-nginx $NGINX_REGISTRY
+    - docker run -d --rm --network=$DOMAIN-network --name $DOMAIN --link $DOMAIN-nginx:t-$DOMAIN --link $DOMAIN-mongodb:your-domain-$MS-mongodb $PHP_REGISTRY
+    - docker cp $ENV_FILENAME.test $DOMAIN:/var/www/html/.env
+    - docker exec -i $DOMAIN-nginx sed -i "s/\ \ server\ .*$/  server $DOMAIN:9000\;/g" /etc/nginx/conf.d/default.conf
+    - docker exec -i $DOMAIN-nginx sed -i "s/index\.php/index-test\.php/g" /etc/nginx/conf.d/default.conf
+    - docker exec -i $DOMAIN-nginx bash -c 'nginx -t'
+    - docker exec -i $DOMAIN-nginx bash -c 'nginx -s reload'
+    - docker exec -i $DOMAIN bash -c 'php console/yii app/setup  --interactive=0'
+    - docker exec -i $DOMAIN bash -c 'cp '$FUNCTIONAL_SUITE_DIST_YML' ./tests/codeception/api/functional.suite.dist.yml'
+    - docker exec -i $DOMAIN bash -c 'cd tests/codeception/api && ../../../vendor/bin/codecept run unit $*  -d'
+    - docker exec -i $DOMAIN bash -c 'sleep 5'
+    - docker exec -i $DOMAIN bash -c 'php tests/codeception/bin/yii migrate --interactive=0'
+    - docker exec -i $DOMAIN bash -c 'php tests/codeception/bin/yii migrate --migrationPath=@tests/codeception/common/migrations --interactive=0'
+    - docker exec -i $DOMAIN bash -c 'cd tests/codeception/api && ../../../vendor/bin/codecept run functional -vvv'
+  tags:
+  - gitlab-image-builder
+  before_script:
+    - rm -f ~/.docker/config.json
+    - rsync -av /var/lib/gitlab-runner/your-domain/env/ env/ >/dev/null
+    - docker stop $DOMAIN-mongodb $DOMAIN-nginx $DOMAIN || true
+    - docker network rm $DOMAIN-network || true
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  after_script:
+    - docker stop $DOMAIN-mongodb $DOMAIN-nginx $DOMAIN || true
+    - docker network rm $DOMAIN-network || true
+
+.push: &push
+  stage: push
+  script:
+    - docker push $NGINX_REGISTRY
+    - docker push $PHP_REGISTRY
+  tags:
+    - gitlab-image-builder
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+.deploy: &deploy
+  stage: deploy
+  script:
+#    - ssh root@$KUBERNETES_MASTER "kubectl set image deployment/$KUBERNETES_DEPLOYMENT_NAME $NGINX_CONTAINER_NAME=$NGINX_REGISTRY"
+#    - ssh root@$KUBERNETES_MASTER "kubectl set image deployment/$KUBERNETES_DEPLOYMENT_NAME $PHP_CONTAINER_NAME=$PHP_REGISTRY"
+    - helm --kubeconfig /home/gitlab-runner/$KUBERNETES_MASTER upgrade $MS --install --debug -f ./helm/CronJob-Values.yaml -f ./helm/Deployments-Values.yaml  -f $HELM_VALUES ./helm 
+    - ssh root@$KUBERNETES_MASTER "kubectl get pods | grep $KUBERNETES_DEPLOYMENT_NAME- | awk '{print \$1}' | xargs kubectl delete pod;"
+  tags:
+    - gitlab-image-builder
+
+############################# STAGE #############################
+Stage build:
+  <<: *stage_variables
+  <<: *build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop" && $CI_PIPELINE_SOURCE != "web"
+
+Stage test:
+  <<: *stage_variables
+  <<: *test
+  needs: 
+    - Stage build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop" && $CI_PIPELINE_SOURCE != "web"
+
+Stage push:
+  <<: *stage_variables
+  <<: *push
+  needs: 
+    - Stage test
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop" && $CI_PIPELINE_SOURCE != "web"
+
+Stage deploy:
+  <<: *stage_variables
+  <<: *deploy
+  needs: 
+    - Stage push
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop" && $CI_PIPELINE_SOURCE != "web"
+
+############################# WEB #############################      
+Build stage from web:
+  <<: *stage_variables
+  <<: *build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+Test stage from web:
+  <<: *stage_variables
+  <<: *test
+  needs:
+    - Build stage from web
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'    
+
+Push stage from web:
+  <<: *stage_variables
+  <<: *push
+  needs:
+    - Test stage from web
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+Deploy stage from web:
+  <<: *stage_variables
+  <<: *deploy
+  needs:
+    - Push stage from web
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+############################# PROD ############################# 
+Prod build:
+  <<: *prod_variables
+  <<: *build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE != "web"
+
+Prod test:
+  <<: *prod_variables
+  <<: *test
+  needs:
+    - Prod build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE != "web"
+
+Prod push:
+  <<: *prod_variables
+  <<: *push
+  needs:
+    - Prod test
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE != "web"
+
+Prod deploy:
+  <<: *prod_variables
+  <<: *deploy
+  needs:
+    - Prod push
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE != "web"
+
+############################# TEST ############################# 
+
+TEST build:
+  <<: *stage_variables
+  <<: *build
+  only:
+    refs:
+      - test
+
+TEST test:
+  <<: *stage_variables
+  <<: *test
+  only:
+    refs:
+      - test
+
+TEST push:
+  <<: *stage_variables
+  <<: *push
+  only:
+    refs:
+      - test
+
+TEST deploy:
+  <<: *stage_variables
+  <<: *deploy
+  only:
+    refs:
+      - test
