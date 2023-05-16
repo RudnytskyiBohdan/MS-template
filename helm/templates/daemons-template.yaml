@@ -1,0 +1,42 @@
+{{- range $name, $spec := $.Values.daemons }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Chart.Name }}-{{ $name }}
+  labels:
+    daemon: {{ $.Chart.Name }}-{{ $name }}
+    type: daemon
+    service: {{ $.Chart.Name }}
+  annotations:
+    app.kubernetes.io/managed-by: "Helm"
+spec:
+  replicas: {{ $spec.replicas }}
+  selector:
+    matchLabels:
+      daemon: {{ $.Chart.Name }}-{{ $name }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        service: {{ $.Chart.Name }}
+        daemon: {{ $.Chart.Name }}-{{ $name }}
+    spec:
+      containers:
+      - name: {{ $.Chart.Name -}} - {{- $name }}
+        image: registry.gitlab.com/your-domain/{{- $.Chart.Name -}}/{{ $.Values.KUBERNETES_ENV }}-php
+        imagePullPolicy: Always
+        command:
+        - /bin/bash
+        args:
+        - "-c"
+        - "{{ $spec.command }}"
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+      - name: gitlab-your-domain
+  {{ end }}

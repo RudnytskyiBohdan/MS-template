@@ -1,0 +1,14 @@
+deployments:
+  - name: partner
+    replicas: 2
+    containers:
+      nginx:
+        image: nginx
+        ports:
+          - containerPort: 80
+            name: http
+
+#daemons:
+#  bash:
+#    command: "/bin/bash"
+#    replicas: "1"

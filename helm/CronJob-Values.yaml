@@ -1,0 +1,4 @@
+#cronJobs:
+# warm-up-b-a: 
+#    command: "bin/console cache:warm-up:b-a"
+#    schedule: "0 6 * * *"

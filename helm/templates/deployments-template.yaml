@@ -1,0 +1,115 @@
+{{- range $.Values.deployments }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  labels:
+    service: {{ .name }}
+    type: deployment
+    deployment: {{ .name }}
+    app.kubernetes.io/managed-by: "Helm"
+  annotations:
+    app.kubernetes.io/managed-by: "Helm"
+    meta.helm.sh/release-namespace: default
+    meta.helm.sh/release-name: {{ .name }}
+spec:
+  replicas: {{ .replicas }}
+  selector:
+    matchLabels:
+      deployment: {{ .name }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        deployment: {{ .name }}
+    spec:
+      containers: {{- range $name, $spec := .containers }}
+        - name: {{ $name }}
+          env: {{ range $spec.env }}
+          - name: {{ .name }}
+            value: {{ .value }}
+          {{- end }}
+          volumeMounts: {{ range $spec.volumeMounts }}
+          - mountPath: {{ .mountPath }}
+            name: {{ .name }}
+            subPath: {{ .subPath }}
+          {{- end }}
+          image: registry.gitlab.com/your-domain/{{- $.Chart.Name -}}/{{ $spec.image }}
+          imagePullPolicy: Always
+          command:
+          {{- range $args := $spec.command }}
+            - {{ $args | quote }}
+          {{- end }}
+          ports:
+          {{- range $spec.ports }}
+          - containerPort: {{ .containerPort }}
+            name: {{ .name }}
+            protocol: TCP
+          {{- end }}
+        {{- end }}
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: gitlab-your-domain
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  labels:
+    service: {{ .name }}
+    app.kubernetes.io/managed-by: "Helm"
+  annotations:
+    app.kubernetes.io/managed-by: "Helm"
+    meta.helm.sh/release-namespace: default
+    meta.helm.sh/release-name: {{ .name }}
+spec:
+  type: ClusterIP
+  selector:
+    deployment: {{ .name }}
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 80
+      
+---
+
+{{- if .hpa  -}}
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .name }}
+  labels:
+    service: {{ .name }}
+    type: hpa
+    deployment: {{ .name }}
+    app.kubernetes.io/managed-by: "Helm"
+spec:
+  minReplicas: {{ .minReplicas }}
+  maxReplicas: {{ .maxReplicas }}
+  metrics:
+  - resource:
+      name: memory
+      target:
+        averageUtilization: {{ .targetMemoryUtilizationPercentage }}
+        type: Utilization
+    type: Resource
+  - resource:
+      name: cpu
+      target:
+        averageUtilization: {{ .targetCPUUtilizationPercentage }}
+        type: Utilization
+    type: Resource
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .name }}
+{{- end -}}
+{{- end }}

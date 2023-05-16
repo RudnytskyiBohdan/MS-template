@@ -1,0 +1,34 @@
+{{- range $name, $spec := $.Values.cronJobs }}
+---
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: {{ $.Chart.Name -}} -cron- {{- $name }}
+  labels:
+    service: {{ $.Chart.Name }}
+    type: cron
+spec:
+  schedule: {{ $spec.schedule | quote }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            service: {{ $.Chart.Name }}
+            type: cron
+            cronJob: {{ $name }}
+        spec:
+          containers:
+            - name: {{ $.Chart.Name -}} -cron- {{- $name -}} -job
+              image: registry.gitlab.com/your-domain/{{- $.Chart.Name -}}/{{ $.Values.KUBERNETES_ENV }}-php
+              imagePullPolicy: Always
+              command:
+                - /bin/bash
+              args:
+              - "-c"
+              - "{{ $spec.command }}"
+          restartPolicy: OnFailure
+          dnsPolicy: ClusterFirst
+          imagePullSecrets:
+            - name: gitlab-your-domain
+  {{ end }}
