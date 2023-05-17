@@ -1,0 +1,29 @@
+{
+    "id": "data-prod-serv",
+    "name": "data",
+    "tags": [
+      "data",
+      "prod",
+      "services"
+    ],
+    "address": "159.69.246.248",
+    "port": 8090,
+    "checks": [{
+            "id": "data-prod-serv",
+            "name": "data prod PHP status",
+            "docker_container_id": "your-domain-data-prod",
+            "shell": "/bin/bash",
+            "args": ["./devops/scripts/php-hc.sh"],
+            "interval": "5s",
+            "timeout": "5s"
+        }, {
+            "id": "data-prod-serv",
+            "name": "data prod Nginx status",
+            "docker_container_id": "your-domain-data-nginx-prod",
+            "shell": "/bin/bash",
+            "args": ["/var/www/html/devops/scripts/nginx-hc.sh"],
+            "interval": "5s",
+            "timeout": "5s"
+        }
+    ]
+}
